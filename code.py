@@ -1,45 +1,58 @@
 import pennylane as qml
-from pennylane import numpy as np
+
+def site_spin2qubit(site, spin):
+    """
+    Maps a site and spin to a qubit index. up=0, down = 1.
+    """
+    return 2 * site + spin
 
 def generate_hubbard_terms(n_sites):
     """
-    Generates hermitian terms for the Hubbard model on a two-leg ladder.
+    Generates hermitian terms for the Hubbard model on a two-leg ladder. In all code, here we assume N=4.
     Args:
         n_sites (int): Total number of sites (must be even for a 2-leg ladder).
     """
-    n_orbitals = 2 * n_sites  # Each site has spin-up and spin-down orbitals
-    h_h_ops, h_v_ops, h_u_ops = [], [], []
+    
+    # Generate h_h
+    h_h = []
 
-    # Helper to get orbital index: site i, spin s (0 for up, 1 for down)
-    def idx(site, spin):
-        return 2 * site + spin
+    for (u,v) in [(0,1), (2,3),(0,2), (1,3)]: #the last 2 elements are for h_v
+        for s in [0,1]:
+            term = qml.fermi.FermiWord({(0, site_spin2qubit(u,s)) : "+", (1, site_spin2qubit(v,s)) : "-"})
+            term_conj = qml.fermi.FermiWord({(0, site_spin2qubit(v,s)) : "+", (1, site_spin2qubit(u,s)) : "-"})
 
-    half_n = n_sites // 2
+            hermitian_term = qml.fermi.FermiSentence({term: 1.0, term_conj: 1.0})
+            h_h.append(hermitian_term)
+    
 
-    for i in range(half_n):
-        for s in [0, 1]:
-            # 1. h_h: Horizontal hopping (periodic boundary conditions)
-            # Top leg: i to (i+1) % half_n; Bottom leg: (i+half_n) to ((i+1)%half_n + half_n)
-            site_a, site_b = i, (i + 1) % half_n
-            site_c, site_d = i + half_n, ((i + 1) % half_n) + half_n
-            
-            for (u, v) in [(site_a, site_b), (site_c, site_d)]:
-                # Fermionic hopping: c*_u c_v + c*_v c_u
-                op = qml.FermiC(idx(u, s)) @ qml.FermiA(idx(v, s))
-                h_h_ops.append(op + qml.adjoint(op))
 
-            # 2. h_v: Vertical hopping (open boundary conditions)
-            # Between top leg (i) and bottom leg (i + half_n)
-            op_v = qml.FermiC(idx(i, s)) @ qml.FermiA(idx(i + half_n, s))
-            h_v_ops.append(op_v + qml.adjoint(op_v))
+    # Generate h_v
+    h_v = []
+    h_v = h_h[4:]
+    h_h=h_h[:4]
 
-        # 3. h_U: Repulsion terms (on-site interaction)
-        # U * n_{i, up} * n_{i, down} for both legs
-        for site in [i, i + half_n]:
-            n_up = qml.FermiC(idx(site, 0)) @ qml.FermiA(idx(site, 0))
-            n_down = qml.FermiC(idx(site, 1)) @ qml.FermiA(idx(site, 1))
-            h_u_ops.append(n_up @ n_down)
+    #Generate h_U
 
-    return h_h_ops, h_v_ops, h_u_ops
+    U = 2
+    h_U = []
+    for i in range(4):
+        term = qml.fermi.FermiWord({(0, site_spin2qubit(i,0)) : "+", (1, site_spin2qubit(i,0)) : "-", (2, site_spin2qubit(i,1)) : "+", (3, site_spin2qubit(i,1)) : "-"})
+        h_U.append(qml.fermi.FermiSentence({term: U}))
+    return h_h, h_v, h_U
 
-generate_hubbard_terms(4)
+
+h_h, h_v, h_U = generate_hubbard_terms(4)
+
+h_h_total = h_h[0]
+for h_h_i in h_h[1:]:
+    h_h_total += h_h_i
+
+h_v_total = h_v[0]
+for h_v_i in h_v[1:]:
+    h_v_total += h_v_i
+
+h_U_total = h_U[0]
+for h_U_i in h_U[1:]:
+    h_U_total += h_U_i
+
+print(h_h_total)
