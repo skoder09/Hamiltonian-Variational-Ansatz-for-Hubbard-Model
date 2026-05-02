@@ -23,9 +23,9 @@ def generate_hubbard_terms(n_sites, PBC = True):
             term_conj = qml.fermi.FermiWord({(0, site_spin2qubit(v,s)) : "+", (1, site_spin2qubit(u,s)) : "-"})
 
             if (u,v)==(0,1) or (u,v) == (2,3): #PBC only in horizontal direction
-                hermitian_term = qml.fermi.FermiSentence({term: 1.0+float(PBC), term_conj: 1.0+float(PBC)})   #having PBC same as horizontal coupling with double strength (for N=4 only)
+                hermitian_term = qml.fermi.FermiSentence({term: -1.0-float(PBC), term_conj: -1.0-float(PBC)})   #having PBC same as horizontal coupling with double strength (for N=4 only)
             else:
-                hermitian_term = qml.fermi.FermiSentence({term: 1.0, term_conj: 1.0})
+                hermitian_term = qml.fermi.FermiSentence({term: -1.0, term_conj: -1.0})
             h_h.append(hermitian_term)
     
 
@@ -59,12 +59,6 @@ h_U_total = h_U[0]
 for h_U_i in h_U[1:]:
     h_U_total += h_U_i
 
-print(h_U_total)
-print("--------------")
-print(h_h_total)
-print("--------------")
-print(h_v_total)
-
 
 
 #create exponential:
@@ -94,21 +88,21 @@ def circuit(S, theta):
 
         """
 
-        for i, term in enumerate(h_U_total):
+        for i, term in enumerate(h_U):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][0]/2)
 
         #at this point in code, circ = e^{i*theta*h_U}
-        for i, term in enumerate(h_h_total):
+        for i, term in enumerate(h_h):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][1])
         #at this point in code, circ = e^{i*theta*h_U} @ e^{i*theta*h_h}
-        for i, term in enumerate(h_v_total):
+        for i, term in enumerate(h_v):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][2])
         #at this point in code, circ = e^{i*theta*h_U} @ e^{i*theta*h_h} @e^{i*theta*h_v}
         
-        for i, term in enumerate(h_U_total):
+        for i, term in enumerate(h_U):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][0]/2)
         
@@ -116,3 +110,8 @@ def circuit(S, theta):
     
 
     return qml.state()
+
+
+non_int_Ham = h_v_total + h_h_total
+print(non_int_Ham)
+

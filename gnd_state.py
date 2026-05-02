@@ -1,6 +1,12 @@
 import pennylane as qml
 import numpy as np
 from numpy.linalg import eigh
+import matplotlib.pyplot as plt
+
+import warnings
+warnings.filterwarnings("ignore")
+
+
 def site_spin2qubit(site, spin):
     """
     Maps a site and spin to a qubit index. up=0, down = 1.
@@ -77,41 +83,33 @@ for word, coeff in non_int_Ham.items():
     (_, p), op0 = ops[0]
     (_, q), op1 = ops[1]
     h[p, q] += coeff
-print("H matrix: ", h)
+
 eps, V = eigh(h)
 U = V.T
 
-#occupation = qml.qchem.hf_state(n_electrons, n_orbitals)
-# occupation = np.zeros(n_orbitals, dtype=int)
-# occupation[np.argsort(eps)[:n_electrons]] = 1
-
-"""
-occupation as in paper: 
-"""
-
+#occupation = qml.qchem.hf_state(n_electrons, n_orbitals)   #previous approach
+occupation = np.zeros(n_orbitals, dtype=int)
+occupation[np.argsort(eps)[:n_electrons]] = 1 #=[1 1 1 1 0 0 0 0]
 
 
 dev = qml.device("default.qubit", wires=n_orbitals)
 qubit_H = qml.jordan_wigner(non_int_Ham)
+full_Ham = qml.jordan_wigner(h_h_total+h_v_total+h_U_total)
 
 
 def ground_state():
     qml.BasisState(occupation, wires=range(n_orbitals))
     qml.BasisRotation(wires=range(n_orbitals), unitary_matrix=U, check = True)
-    return qml.state()
+    
 
-@qml.qnode(dev)
-def ground_energy():
-    qml.BasisState(occupation, wires=range(n_orbitals))
-    qml.BasisRotation(wires=range(n_orbitals), unitary_matrix=U)
-    return qml.expval(qubit_H)
+# @qml.qnode(dev)
+# def ground_energy():
+#     qml.BasisState(occupation, wires=range(n_orbitals))
+#     qml.BasisRotation(wires=range(n_orbitals), unitary_matrix=U)
+#     return qml.expval(qubit_H)
 
-#psi = ground_state()
-E0 = ground_energy()
 
-print("single-particle energies =", eps)
-print("half-filled ground-state energy =", E0)
-#print("statevector =", psi)
+#E0 = ground_energy()
 
 
 @qml.qnode(dev)
@@ -135,26 +133,70 @@ def circuit(S, theta):
 
         """
 
-        for i, term in enumerate(h_U_total):
+        for i, term in enumerate(h_U):
+            
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][0]/2)
 
         #at this point in code, circ = e^{i*theta*h_U}
-        for i, term in enumerate(h_h_total):
+        for i, term in enumerate(h_h):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][1])
         #at this point in code, circ = e^{i*theta*h_U} @ e^{i*theta*h_h}
-        for i, term in enumerate(h_v_total):
+        for i, term in enumerate(h_v):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][2])
         #at this point in code, circ = e^{i*theta*h_U} @ e^{i*theta*h_h} @e^{i*theta*h_v}
         
-        for i, term in enumerate(h_U_total):
+        for i, term in enumerate(h_U):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][0]/2)
         
         #at this point in code, circ = e^{i*theta*h_U/2} @ e^{i*theta*h_h} @e^{i*theta*h_v} @ e^{i*theta*h_U/2}
     
 
-    return qml.state()
+    return qml.expval(full_Ham)
+
+
+#----------
+# INITAL PARAM. GENERATION AND CIRCUIT EVAL. FOR THOSE PARAMS.
+#----------
+S_tot = 3
+optim_pts = 6 #from paper
+
+init_pts = np.random.normal(0, 0.1, (optim_pts, S_tot, 3))
+
+exp_energy = np.array([circuit(S_tot, theta) for theta in init_pts])
+print(exp_energy)
+
+ 
+#----------
+# GREEDY NOISY SEARCH
+#----------
+
+n_steps = 150
+step_scale = 0.2
+
+for _ in range(n_steps):
+    new_pts = init_pts + np.random.normal(0, step_scale, (optim_pts, S_tot, 3))
+    new_exp_energy = np.array([circuit(S_tot, theta) for theta in new_pts])
+
+    all_energy = np.concatenate([exp_energy, new_exp_energy])
+    all_pts = np.concatenate([init_pts, new_pts], axis=0)
+    idx = np.argsort(all_energy)[:6]
+    
+    lowest_energies = all_energy[idx]
+    lowest_points = all_pts[idx]
+
+    print("Lowest energies: ", lowest_energies, _)
+    exp_energy = lowest_energies
+    init_pts = lowest_points
+#lowest energy: -24.6
+
+
+
+
+
+
+
 
