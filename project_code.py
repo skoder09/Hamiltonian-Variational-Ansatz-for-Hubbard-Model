@@ -94,21 +94,21 @@ def circuit(S, theta):
 
         """
 
-        for i, term in enumerate(h_U_total):
+        for i, term in enumerate(h_U):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][0]/2)
 
         #at this point in code, circ = e^{i*theta*h_U}
-        for i, term in enumerate(h_h_total):
+        for i, term in enumerate(h_h):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][1])
         #at this point in code, circ = e^{i*theta*h_U} @ e^{i*theta*h_h}
-        for i, term in enumerate(h_v_total):
+        for i, term in enumerate(h_v):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][2])
         #at this point in code, circ = e^{i*theta*h_U} @ e^{i*theta*h_h} @e^{i*theta*h_v}
         
-        for i, term in enumerate(h_U_total):
+        for i, term in enumerate(h_U):
             jw_term = qml.jordan_wigner(term)
             qml.exp(jw_term, 1j*theta[step][0]/2)
         
