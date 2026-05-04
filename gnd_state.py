@@ -249,34 +249,43 @@ print(f"Best parameters: {best_params}")
 
 n_steps = 150
 step_scale = 0.1
-prev_best_energy=1000000
+prev_best_energy = 1000000
 
 tol = 1e-9
 
-for _ in range(100):
-    init_pts = np.reshape(best_params, (S_tot,3))
-    exp_energy = circuit(S_tot, init_pts)
-    
+acceptance_window = 30
+acceptance_cutoff = 15
+step_increase_factor = 1.2
+step_decrease_factor = 0.8
 
-    for i in range(n_steps+1):
-        if i>60:
-            step_scale /= (i//60)+1
-        
-        new_pts = init_pts + np.random.normal(0, step_scale, (S_tot, 3))
-        new_exp_energy = circuit(S_tot, new_pts) 
-        
+for _ in range(100):
+    init_pts = np.reshape(best_params, (S_tot, 3))
+    exp_energy = circuit(S_tot, init_pts)
+
+    current_step_scale = step_scale
+    acceptance_count = 0
+
+    for i in range(n_steps + 1):
+        new_pts = init_pts + np.random.normal(0, current_step_scale, (S_tot, 3))
+        new_exp_energy = circuit(S_tot, new_pts)
 
         if new_exp_energy < exp_energy:
             lowest_energy = new_exp_energy
             lowest_point = new_pts
+            acceptance_count += 1
         else:
             lowest_energy = exp_energy
             lowest_point = init_pts
 
-        #print("Lowest energies: ", lowest_energy, step_scale, i)
         exp_energy = lowest_energy
         init_pts = lowest_point
-        step_scale = 0.1
+
+        if (i + 1) % acceptance_window == 0:
+            if acceptance_count > acceptance_cutoff:
+                current_step_scale *= step_increase_factor
+            else:
+                current_step_scale *= step_decrease_factor
+            acceptance_count = 0
 
     # POWELL:
     result = minimize(
@@ -294,7 +303,7 @@ for _ in range(100):
     prev_best_energy = best_energy
 
     print("--------------")
-    print(f"Best energy found ({_}): ", best_energy)
+    print(f"Best energy found ({_}): ", best_energy, " with step size:", current_step_scale)
     print("--------------")
 
 
