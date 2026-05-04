@@ -2,6 +2,7 @@ import pennylane as qml
 import numpy as np
 from numpy.linalg import eigh
 import matplotlib.pyplot as plt
+from scipy.optimize import minimize
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -51,7 +52,7 @@ def generate_hubbard_terms(n_sites, PBC = True):
     return h_h, h_v, h_U
 
 
-h_h, h_v, h_U = generate_hubbard_terms(4, False)
+h_h, h_v, h_U = generate_hubbard_terms(4)
 
 h_h_total = h_h[0]
 for h_h_i in h_h[1:]:
@@ -71,7 +72,7 @@ for h_U_i in h_U[1:]:
 
 ####################
 non_int_Ham = h_h_total + h_v_total
-print("HAM: ", non_int_Ham)
+#print("HAM: ", non_int_Ham)
 
 n_orbitals = 8
 n_electrons = 4
@@ -175,9 +176,12 @@ print(exp_energy)
 #----------
 
 n_steps = 150
-step_scale = 0.2
+step_scale = 0.15
 
-for _ in range(n_steps):
+for i in range(n_steps+1):
+    if i>60:
+        step_scale /= (i//60)+1
+    
     new_pts = init_pts + np.random.normal(0, step_scale, (optim_pts, S_tot, 3))
     new_exp_energy = np.array([circuit(S_tot, theta) for theta in new_pts])
 
@@ -188,12 +192,113 @@ for _ in range(n_steps):
     lowest_energies = all_energy[idx]
     lowest_points = all_pts[idx]
 
-    print("Lowest energies: ", lowest_energies, _)
+    print("Lowest energies: ", lowest_energies, step_scale, i)
     exp_energy = lowest_energies
     init_pts = lowest_points
-#lowest energy: -24.6
+    step_scale = 0.1
 
 
+
+# at this point exp_energy is the lowest possible energy we could find and init_pts are the corresponding points of theta
+# print(init_pts, init_pts.shape)
+
+# ------------
+# POWELL METHOD
+# ------------
+
+
+def cost_function(theta_1d):
+    theta_reshaped = theta_1d.reshape((S_tot, 3))
+    
+    energy = circuit(S_tot, theta_reshaped)
+    return float(energy)
+
+
+final_res = None 
+
+for i in range(6):
+    result = minimize(
+        fun=cost_function,
+        x0=init_pts[i].flatten(),
+        method='Powell',
+        options={'disp': True, 'maxiter': 1000}
+    )
+    
+    if final_res == None:
+        final_res = result
+    else:
+        if result.fun < final_res.fun:
+            final_res = result
+            
+        
+
+
+# 4. Extract the results
+best_energy = final_res.fun
+best_params = final_res.x
+
+
+print(f"\nOptimization Success: {final_res.success}")
+print(f"Lowest Energy: {best_energy:.10f}")
+print(f"Best parameters: {best_params}")
+
+
+# -----------
+# ALTERNATE BETWEEN GREEDY SEARCH AND POWELL
+# -----------
+
+n_steps = 150
+step_scale = 0.1
+prev_best_energy=1000000
+
+tol = 1e-9
+
+for _ in range(100):
+    init_pts = np.reshape(best_params, (S_tot,3))
+    exp_energy = circuit(S_tot, init_pts)
+    
+
+    for i in range(n_steps+1):
+        if i>60:
+            step_scale /= (i//60)+1
+        
+        new_pts = init_pts + np.random.normal(0, step_scale, (S_tot, 3))
+        new_exp_energy = circuit(S_tot, new_pts) 
+        
+
+        if new_exp_energy < exp_energy:
+            lowest_energy = new_exp_energy
+            lowest_point = new_pts
+        else:
+            lowest_energy = exp_energy
+            lowest_point = init_pts
+
+        #print("Lowest energies: ", lowest_energy, step_scale, i)
+        exp_energy = lowest_energy
+        init_pts = lowest_point
+        step_scale = 0.1
+
+    # POWELL:
+    result = minimize(
+            fun=cost_function,
+            x0=init_pts.flatten(),
+            method='Powell',
+            options={'disp': True, 'maxiter': 1000}
+        )
+
+    best_energy = result.fun
+    best_params = result.x
+
+    if np.abs(best_energy-prev_best_energy) < tol:
+        break
+    prev_best_energy = best_energy
+
+    print("--------------")
+    print(f"Best energy found ({_}): ", best_energy)
+    print("--------------")
+
+
+# Target energy: -6.26500420602625
 
 
 
