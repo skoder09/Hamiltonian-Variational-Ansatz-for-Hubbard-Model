@@ -318,7 +318,7 @@ for _ in range(10):
         current_step_scale,
     )
     print("--------------")
-    best_energy_arr.append(best_energy)
+    best_energy_arr.append(float(best_energy))
 
 # Target energy: -6.26500420602625
 
@@ -328,3 +328,5 @@ plt.plot(best_energy_arr)
 plt.xlabel("Iteration")
 plt.ylabel("Best Energy")
 plt.show()
+
+print(best_energy_arr)
