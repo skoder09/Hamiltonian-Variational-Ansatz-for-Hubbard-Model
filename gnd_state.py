@@ -113,14 +113,13 @@ def ground_state():
     qml.BasisRotation(wires=range(n_orbitals), unitary_matrix=U, check=True)
 
 
-# @qml.qnode(dev)
-# def ground_energy():
-#     qml.BasisState(occupation, wires=range(n_orbitals))
-#     qml.BasisRotation(wires=range(n_orbitals), unitary_matrix=U)
-#     return qml.expval(qubit_H)
+# ---------------
+# Ansatz preparation
+# ---------------
 
-
-# E0 = ground_energy()
+jw_U = [qml.jordan_wigner(t) for t in h_U]
+jw_h = [qml.jordan_wigner(t) for t in h_h]
+jw_v = [qml.jordan_wigner(t) for t in h_v]
 
 
 @qml.qnode(dev)
@@ -133,34 +132,18 @@ def circuit(S, theta):
     ground_state()
 
     for step in range(S):
-        """
-        performance improvement possible:
-        jw_U = [qml.jordan_wigner(t) for t in h_U_total]
-        jw_h = [qml.jordan_wigner(t) for t in h_h_total]
-        jw_v = [qml.jordan_wigner(t) for t in h_v_total]
-
         for term in jw_U:
-            qml.exp(term, 1j * theta[step][0])
-
-        """
-
-        for i, term in enumerate(h_U):
-            jw_term = qml.jordan_wigner(term)
-            qml.exp(jw_term, 1j * theta[step][0] / 2)
-
+            qml.exp(term, 1j * theta[step][0] / 2)
         # at this point in code, circ = e^{i*theta*h_U}
-        for i, term in enumerate(h_h):
-            jw_term = qml.jordan_wigner(term)
-            qml.exp(jw_term, 1j * theta[step][1])
+        for term in jw_h:
+            qml.exp(term, 1j * theta[step][1])
         # at this point in code, circ = e^{i*theta*h_U} @ e^{i*theta*h_h}
-        for i, term in enumerate(h_v):
-            jw_term = qml.jordan_wigner(term)
-            qml.exp(jw_term, 1j * theta[step][2])
+        for term in jw_v:
+            qml.exp(term, 1j * theta[step][2])
         # at this point in code, circ = e^{i*theta*h_U} @ e^{i*theta*h_h} @e^{i*theta*h_v}
 
-        for i, term in enumerate(h_U):
-            jw_term = qml.jordan_wigner(term)
-            qml.exp(jw_term, 1j * theta[step][0] / 2)
+        for term in jw_U:
+            qml.exp(term, 1j * theta[step][0] / 2)
 
         # at this point in code, circ = e^{i*theta*h_U/2} @ e^{i*theta*h_h} @e^{i*theta*h_v} @ e^{i*theta*h_U/2}
 
@@ -252,7 +235,7 @@ print(f"Best parameters: {best_params}")
 # ALTERNATE BETWEEN GREEDY SEARCH AND POWELL
 # -----------
 
-n_steps = 5
+n_steps = 150
 step_scale = 0.5
 prev_best_energy = 1000000
 
@@ -279,21 +262,13 @@ for _ in range(10):
         if new_exp_energy < exp_energy:
             lowest_energy = new_exp_energy
             lowest_point = new_pts
-            acceptance_count += 1
+
         else:
             lowest_energy = exp_energy
             lowest_point = init_pts
 
         exp_energy = lowest_energy
         init_pts = lowest_point
-
-        if (i + 1) % acceptance_window == 0:
-            if acceptance_count > acceptance_cutoff:
-                current_step_scale *= step_increase_factor
-            else:
-                current_step_scale *= step_decrease_factor
-            print(acceptance_count)
-            acceptance_count = 0
 
     # POWELL:
     result = minimize(
@@ -306,6 +281,16 @@ for _ in range(10):
     best_energy = result.fun
     best_params = result.x
 
+    if best_energy < prev_best_energy:
+        acceptance_count += 1
+    if (_ + 1) % acceptance_window == 0:
+        if acceptance_count > acceptance_cutoff:
+            current_step_scale *= step_increase_factor
+        else:
+            current_step_scale *= step_decrease_factor
+        print(acceptance_count)
+        acceptance_count = 0
+
     if np.abs(best_energy - prev_best_energy) < tol:
         break
     prev_best_energy = best_energy
@@ -316,17 +301,19 @@ for _ in range(10):
         best_energy,
         " with step size:",
         current_step_scale,
+        " and number of",
     )
     print("--------------")
     best_energy_arr.append(float(best_energy))
 
 # Target energy: -6.26500420602625
+# 1000 iteration best energy: -6.26418763742511
 
 
 # Plot the best energy found at each iteration
 plt.plot(best_energy_arr)
 plt.xlabel("Iteration")
-plt.ylabel("Best Energy")
+plt.ylabel("Energy")
 plt.show()
 
 print(best_energy_arr)
