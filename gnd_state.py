@@ -166,7 +166,7 @@ print(exp_energy)
 # GREEDY NOISY SEARCH
 # ----------
 
-n_steps = 150
+n_steps = 5
 step_scale = 0.1
 
 for i in range(n_steps + 1):
@@ -262,13 +262,21 @@ for _ in range(10):
         if new_exp_energy < exp_energy:
             lowest_energy = new_exp_energy
             lowest_point = new_pts
-
+            acceptance_count += 1
         else:
             lowest_energy = exp_energy
             lowest_point = init_pts
 
         exp_energy = lowest_energy
         init_pts = lowest_point
+
+        if (i + 1) % acceptance_window == 0:
+            if acceptance_count > acceptance_cutoff:
+                current_step_scale *= step_increase_factor
+            else:
+                current_step_scale *= step_decrease_factor
+            print(acceptance_count)
+            acceptance_count = 0
 
     # POWELL:
     result = minimize(
@@ -281,16 +289,6 @@ for _ in range(10):
     best_energy = result.fun
     best_params = result.x
 
-    if best_energy < prev_best_energy:
-        acceptance_count += 1
-    if (_ + 1) % acceptance_window == 0:
-        if acceptance_count > acceptance_cutoff:
-            current_step_scale *= step_increase_factor
-        else:
-            current_step_scale *= step_decrease_factor
-        print(acceptance_count)
-        acceptance_count = 0
-
     if np.abs(best_energy - prev_best_energy) < tol:
         break
     prev_best_energy = best_energy
@@ -301,19 +299,17 @@ for _ in range(10):
         best_energy,
         " with step size:",
         current_step_scale,
-        " and number of",
     )
     print("--------------")
     best_energy_arr.append(float(best_energy))
 
 # Target energy: -6.26500420602625
-# 1000 iteration best energy: -6.26418763742511
 
 
 # Plot the best energy found at each iteration
 plt.plot(best_energy_arr)
 plt.xlabel("Iteration")
-plt.ylabel("Energy")
+plt.ylabel("Best Energy")
 plt.show()
 
 print(best_energy_arr)
