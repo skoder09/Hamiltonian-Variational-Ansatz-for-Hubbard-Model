@@ -167,175 +167,210 @@ print("Exact energy: ", exact_energy)
 
 # %%
 
+# ------------
+# Full Optimization
+# ------------
+
+
+def run_full_optimization(
+    circuit_function,
+    S,
+    optim_pts=6,
+    init_sigma=0.1,
+    greedy_n_steps=5,
+    greedy_step_scale=0.1,
+    greedy_decay_start=80,
+    powell_options=None,
+    max_alternate_rounds=10,
+    alternate_n_steps=150,
+    alternate_step_scale=0.001,
+    tol=1e-9,
+    acceptance_window=30,
+    acceptance_cutoff=15,
+    step_increase_factor=1.2,
+    step_decrease_factor=0.8,
+    verbose=True,
+):
+    if powell_options is None:
+        powell_options = {
+            "disp": True,
+            "maxiter": 100,
+            "maxfev": 100,
+            "xtol": 1e-9,
+            "ftol": 1e-9,
+        }
+
+    init_pts = np.random.normal(0, init_sigma, (optim_pts, S, 3))
+    exp_energy = np.array([circuit_function(S, theta) for theta in init_pts])
+
+    # --------------
+    # GREEDY SEARCH
+    # --------------
+
+    if verbose:
+        print("Energy at initial points in parameter space: ", exp_energy)
+
+    step_scale = greedy_step_scale
+
+    for i in range(greedy_n_steps + 1):
+        if i > greedy_decay_start:
+            step_scale /= (i // greedy_decay_start) + 1  # adapt the step size
+
+        new_pts = init_pts + np.random.normal(0, step_scale, (optim_pts, S, 3))
+        new_exp_energy = np.array([circuit_function(S, theta) for theta in new_pts])
+
+        all_energy = np.concatenate([exp_energy, new_exp_energy])
+        all_pts = np.concatenate([init_pts, new_pts], axis=0)
+        idx = np.argsort(all_energy)[:optim_pts]
+
+        lowest_energies = all_energy[idx]
+        lowest_points = all_pts[idx]
+
+        if verbose:
+            print("Lowest energies: ", lowest_energies, step_scale, i)
+
+        exp_energy = lowest_energies
+        init_pts = lowest_points
+        step_scale = greedy_step_scale
+
+    # --------------
+    # POWELL MINIMIZATION
+    # --------------
+
+    def cost_function(theta_1d):
+        theta_reshaped = theta_1d.reshape((S, 3))
+        energy = circuit_function(S, theta_reshaped)
+        return float(energy)
+
+    final_res = None
+
+    for i in range(optim_pts):
+        result = minimize(
+            fun=cost_function,
+            x0=init_pts[i].flatten(),
+            method="Powell",
+            options=powell_options,
+        )
+
+        if final_res == None:
+            final_res = result
+        else:
+            if result.fun < final_res.fun:
+                final_res = result
+
+    best_energy = final_res.fun
+    best_params = final_res.x
+
+    if verbose:
+        print(f"\nOptimization Success: {final_res.success}")
+        print(f"Lowest Energy: {best_energy:.10f}")
+        print(f"Best parameters: {best_params}")
+
+    # --------------
+    # GREEDY AND POWELL ALTERNATE SEARCH
+    # --------------#
+
+    prev_best_energy = 1000000
+    best_energy_arr = []
+
+    for _ in range(max_alternate_rounds):
+        init_pts = np.reshape(best_params, (S, 3))
+        exp_energy = circuit_function(S, init_pts)
+
+        current_step_scale = alternate_step_scale
+        acceptance_count = 0
+
+        for i in range(alternate_n_steps + 1):
+            new_pts = init_pts + np.random.normal(0, current_step_scale, (S, 3))
+            new_exp_energy = circuit_function(S, new_pts)
+
+            if new_exp_energy < exp_energy:
+                lowest_energy = new_exp_energy
+                lowest_point = new_pts
+                acceptance_count += 1
+            else:
+                lowest_energy = exp_energy
+                lowest_point = init_pts
+
+            exp_energy = lowest_energy
+            init_pts = lowest_point
+
+            if (i + 1) % acceptance_window == 0:
+                if acceptance_count > acceptance_cutoff:
+                    current_step_scale *= step_increase_factor
+                else:
+                    current_step_scale *= step_decrease_factor
+
+                acceptance_count = 0
+
+        result = minimize(
+            fun=cost_function,
+            x0=init_pts.flatten(),
+            method="Powell",
+            options=powell_options,
+        )
+
+        best_energy = result.fun
+        best_params = result.x
+
+        if np.abs(best_energy - prev_best_energy) < tol:
+            break
+        prev_best_energy = best_energy
+
+        if verbose:
+            print("--------------")
+            print(
+                f"Best energy found ({_}): ",
+                best_energy,
+                " with step size:",
+                current_step_scale,
+            )
+            print("--------------")
+        best_energy_arr.append(float(best_energy))
+
+    return best_energy, best_params, best_energy_arr, final_res
+
+
+# %%
+
 # ----------
 # INITAL PARAM. GENERATION AND CIRCUIT EVAL. FOR THOSE PARAMS.
 # ----------
 S_tot = 3
-optim_pts = 6  # from paper
 
-init_pts = np.random.normal(0, 0.1, (optim_pts, S_tot, 3))
-
-exp_energy = np.array([circuit(S_tot, theta) for theta in init_pts])
-print("Energy at initial points in parameter space: ", exp_energy)
+powell_options = {
+    "disp": True,
+    "maxiter": 100,
+    "maxfev": 100,
+    "xtol": 1e-9,
+    "ftol": 1e-9,
+}
 
 # %%
 
 # ----------
-# GREEDY NOISY SEARCH
+# OPTIMIZATION
 # ----------
 
-n_steps = 5
-step_scale = 0.1
-
-for i in range(n_steps + 1):
-    if i > 80:
-        step_scale /= (i // 80) + 1
-
-    new_pts = init_pts + np.random.normal(0, step_scale, (optim_pts, S_tot, 3))
-    new_exp_energy = np.array([circuit(S_tot, theta) for theta in new_pts])
-
-    all_energy = np.concatenate([exp_energy, new_exp_energy])
-    all_pts = np.concatenate([init_pts, new_pts], axis=0)
-    idx = np.argsort(all_energy)[:6]
-
-    lowest_energies = all_energy[idx]
-    lowest_points = all_pts[idx]
-
-    print("Lowest energies: ", lowest_energies, step_scale, i)
-    exp_energy = lowest_energies
-    init_pts = lowest_points
-    step_scale = 0.1
-
-
-# at this point exp_energy is the lowest possible energy we could find and init_pts are the corresponding points of theta
-# print(init_pts, init_pts.shape)
-
-# %%
-# ------------
-# POWELL METHOD
-# ------------
-
-
-def cost_function(theta_1d):
-    theta_reshaped = theta_1d.reshape((S_tot, 3))
-
-    energy = circuit(S_tot, theta_reshaped)
-    return float(energy)
-
-
-final_res = None
-
-for i in range(6):
-    result = minimize(
-        fun=cost_function,
-        x0=init_pts[i].flatten(),
-        method="Powell",
-        options={
-            "disp": True,
-            "maxiter": 100,
-            "maxfev": 100,
-            "xtol": 1e-9,
-            "ftol": 1e-9,
-        },
-    )
-
-    if final_res == None:
-        final_res = result
-    else:
-        if result.fun < final_res.fun:
-            final_res = result
-
-
-# 4. Extract the results
-best_energy = final_res.fun
-best_params = final_res.x
-
-
-print(f"\nOptimization Success: {final_res.success}")
-print(f"Lowest Energy: {best_energy:.10f}")
-print(f"Best parameters: {best_params}")
-
-
-# %%
-# -----------
-# ALTERNATE BETWEEN GREEDY SEARCH AND POWELL
-# -----------
-
-n_steps = 150
-step_scale = 0.001
-prev_best_energy = 1000000
-
-tol = 1e-9
-
-acceptance_window = 30
-acceptance_cutoff = 15
-step_increase_factor = 1.2
-step_decrease_factor = 0.8
-
-best_energy_arr = []
-
-for _ in range(10):
-    init_pts = np.reshape(best_params, (S_tot, 3))
-    exp_energy = circuit(S_tot, init_pts)
-
-    current_step_scale = step_scale
-    acceptance_count = 0
-
-    for i in range(n_steps + 1):
-        new_pts = init_pts + np.random.normal(0, current_step_scale, (S_tot, 3))
-        new_exp_energy = circuit(S_tot, new_pts)
-
-        if new_exp_energy < exp_energy:
-            lowest_energy = new_exp_energy
-            lowest_point = new_pts
-            acceptance_count += 1
-        else:
-            lowest_energy = exp_energy
-            lowest_point = init_pts
-
-        exp_energy = lowest_energy
-        init_pts = lowest_point
-
-        if (i + 1) % acceptance_window == 0:
-            if acceptance_count > acceptance_cutoff:
-                current_step_scale *= step_increase_factor
-            else:
-                current_step_scale *= step_decrease_factor
-
-            acceptance_count = 0
-
-    # POWELL:
-    result = minimize(
-        fun=cost_function,
-        x0=init_pts.flatten(),
-        method="Powell",
-        options={
-            "disp": True,
-            "maxiter": 100,
-            "maxfev": 100,
-            "xtol": 1e-9,
-            "ftol": 1e-9,
-        },
-    )
-
-    best_energy = result.fun
-    best_params = result.x
-
-    if np.abs(best_energy - prev_best_energy) < tol:
-        break
-    prev_best_energy = best_energy
-
-    print("--------------")
-    print(
-        f"Best energy found ({_}): ",
-        best_energy,
-        " with step size:",
-        current_step_scale,
-    )
-    print("--------------")
-    best_energy_arr.append(float(best_energy))
-
-# Target energy: -6.26500420602625
+best_energy, best_params, best_energy_arr, final_res = run_full_optimization(
+    circuit,
+    S_tot,
+    optim_pts=6,  # from paper
+    init_sigma=0.1,  # stddev of inital param. distribution
+    greedy_n_steps=150,  # num of greedy optimization steps
+    greedy_step_scale=0.1,  # step size for greedy optimization
+    greedy_decay_start=80,  # iteration at which to start step size decay for 1st greedy search
+    powell_options=powell_options,
+    max_alternate_rounds=10,  # max num of alternate optimization rounds we allow (about 30 rounds to converge)
+    alternate_n_steps=150,  # num of steps for alternate optimization
+    alternate_step_scale=0.001,  # step size for alternate optimization
+    tol=1e-9,
+    acceptance_window=30,  # window size for step size decrease
+    acceptance_cutoff=15,  # num of consecutive iterations with no improvement before decreasing step size
+    step_increase_factor=1.2,
+    step_decrease_factor=0.8,
+    verbose=True,
+)
 
 
 # Plot the best energy found at each iteration
@@ -365,8 +400,8 @@ print("Fidelity to exact state:", fidelity_to_exact_state)
 print("Fidelity to noiseless state:", fidelity_to_noiseless_state)
 
 # %%
-shot_list = [100, 1000, 10000, 50000, 100000]
-n_shot_repeats = 30
+shot_list = [100, 1000, 100000]
+n_shot_repeats = 1
 
 shot_mean_energies = []
 shot_std_energies = []
@@ -374,6 +409,7 @@ exact_energy_errors = []
 noiseless_energy_errors = []
 
 for shots in shot_list:
+    print("Investigating for: ", shots, "shots.....")
     dev_shot = qml.device("default.qubit", wires=n_orbitals, shots=shots)
 
     @qml.qnode(dev_shot)
@@ -395,8 +431,35 @@ for shots in shot_list:
         elif ret_val == "samples":
             return qml.sample(wires=range(n_orbitals))
 
+    shot_best_energy, shot_best_params, shot_best_energy_arr, shot_final_res = (
+        run_full_optimization(
+            circuit_shot_noise,
+            S_tot,
+            optim_pts=6,
+            init_sigma=0.1,
+            greedy_n_steps=150,
+            greedy_step_scale=0.1,
+            greedy_decay_start=80,
+            powell_options=powell_options,
+            max_alternate_rounds=10,
+            alternate_n_steps=150,
+            alternate_step_scale=0.001,
+            tol=1e-9,
+            acceptance_window=30,
+            acceptance_cutoff=15,
+            step_increase_factor=1.2,
+            step_decrease_factor=0.8,
+            verbose=False,
+        )
+    )
+
+    shot_best_params_reshaped = np.reshape(shot_best_params, (S_tot, 3))
+
     sampled_energies = np.array(
-        [circuit_shot_noise(S_tot, best_params_reshaped) for _ in range(n_shot_repeats)]
+        [
+            circuit_shot_noise(S_tot, shot_best_params_reshaped)
+            for _ in range(n_shot_repeats)
+        ]
     )
 
     mean_energy = float(np.mean(sampled_energies))
@@ -456,5 +519,335 @@ plt.title("Shot-noise energy error")
 plt.legend()
 plt.show()
 
+
+# %%
+
+# -----------
+# CIRCUIT NOISE ANALYSIS
+# -----------
+circuit_noise_list = [0.001, 0.0005, 0.0001]
+
+# %%
+
+# -----------
+# Depolarizing Noise
+# -----------
+
+depolarizing_energies = []
+depolarizing_exact_energy_errors = []
+depolarizing_noiseless_energy_errors = []
+depolarizing_fidelity_to_exact = []
+depolarizing_fidelity_to_noiseless = []
+
+for p in circuit_noise_list:
+    print("Investigating depolarizing noise for p =", p, ".....")
+    dev_depolarizing = qml.device("default.mixed", wires=n_orbitals)
+
+    @qml.qnode(dev_depolarizing)
+    def circuit_depolarizing_noise(S, theta, ret_val="expval"):
+        ground_state()
+
+        for step in range(S):
+            for term in jw_U:
+                qml.exp(term, 1j * theta[step][0] / 2, num_steps=1)
+                for wire in term.wires:
+                    qml.DepolarizingChannel(p, wires=wire)
+            for term in jw_h:
+                qml.exp(term, 1j * theta[step][1], num_steps=1)
+                for wire in term.wires:
+                    qml.DepolarizingChannel(p, wires=wire)
+            for term in jw_v:
+                qml.exp(term, 1j * theta[step][2], num_steps=1)
+                for wire in term.wires:
+                    qml.DepolarizingChannel(p, wires=wire)
+            for term in jw_U:
+                qml.exp(term, 1j * theta[step][0] / 2, num_steps=1)
+                for wire in term.wires:
+                    qml.DepolarizingChannel(p, wires=wire)
+
+        if ret_val == "expval":
+            return qml.expval(full_Ham)
+        elif ret_val == "density_matrix":
+            return qml.density_matrix(wires=range(n_orbitals))
+
+    (
+        depolarizing_best_energy,
+        depolarizing_best_params,
+        depolarizing_best_energy_arr,
+        depolarizing_final_res,
+    ) = run_full_optimization(
+        circuit_depolarizing_noise,
+        S_tot,
+        optim_pts=6,
+        init_sigma=0.1,
+        greedy_n_steps=1,
+        greedy_step_scale=0.1,
+        greedy_decay_start=80,
+        powell_options=powell_options,
+        max_alternate_rounds=1,
+        alternate_n_steps=1,
+        alternate_step_scale=0.001,
+        tol=1e-9,
+        acceptance_window=30,
+        acceptance_cutoff=15,
+        step_increase_factor=1.2,
+        step_decrease_factor=0.8,
+        verbose=False,
+    )
+    depolarizing_best_params_reshaped = np.reshape(depolarizing_best_params, (S_tot, 3))
+
+    depolarizing_density_matrix = circuit_depolarizing_noise(
+        S_tot, depolarizing_best_params_reshaped, ret_val="density_matrix"
+    )
+    depolarizing_energy = float(depolarizing_best_energy)
+    depolarizing_fid_exact = float(
+        np.real(np.vdot(exact_state, depolarizing_density_matrix @ exact_state))
+    )
+    depolarizing_fid_noiseless = float(
+        np.real(np.vdot(noiseless_state, depolarizing_density_matrix @ noiseless_state))
+    )
+
+    depolarizing_energies.append(depolarizing_energy)
+    depolarizing_exact_energy_errors.append(depolarizing_energy - exact_energy)
+    depolarizing_noiseless_energy_errors.append(depolarizing_energy - noiseless_energy)
+    depolarizing_fidelity_to_exact.append(depolarizing_fid_exact)
+    depolarizing_fidelity_to_noiseless.append(depolarizing_fid_noiseless)
+
+
+print("\nDepolarizing-noise summary")
+print(
+    "p | energy | error_to_exact | error_to_noiseless | fid_to_exact | fid_to_noiseless"
+)
+for i, p in enumerate(circuit_noise_list):
+    print(
+        f"{p} | "
+        f"{depolarizing_energies[i]:.10f} | "
+        f"{depolarizing_exact_energy_errors[i]:.10f} | "
+        f"{depolarizing_noiseless_energy_errors[i]:.10f} | "
+        f"{depolarizing_fidelity_to_exact[i]:.10f} | "
+        f"{depolarizing_fidelity_to_noiseless[i]:.10f}"
+    )
+
+# %%
+
+plt.figure()
+plt.plot(
+    circuit_noise_list, depolarizing_energies, marker="o", label="Depolarizing energy"
+)
+plt.axhline(exact_energy, linestyle="--", color="green", label="Exact energy")
+plt.axhline(
+    noiseless_energy, linestyle=":", color="orange", label="Noiseless circuit energy"
+)
+plt.xlabel("Depolarizing probability p")
+plt.ylabel("Energy")
+plt.title("Depolarizing-noise energy estimates")
+plt.legend()
+plt.show()
+
+
+plt.figure()
+plt.plot(
+    circuit_noise_list,
+    np.abs(depolarizing_exact_energy_errors),
+    marker="o",
+    label="|E_dep - E_exact|",
+)
+plt.plot(
+    circuit_noise_list,
+    np.abs(depolarizing_noiseless_energy_errors),
+    marker="s",
+    label="|E_dep - E_noiseless|",
+)
+plt.xlabel("Depolarizing probability p")
+plt.ylabel("Absolute energy error")
+plt.title("Depolarizing-noise energy error")
+plt.legend()
+plt.show()
+
+
+plt.figure()
+plt.plot(
+    circuit_noise_list,
+    depolarizing_fidelity_to_exact,
+    marker="o",
+    label="Fidelity to exact state",
+)
+plt.plot(
+    circuit_noise_list,
+    depolarizing_fidelity_to_noiseless,
+    marker="s",
+    label="Fidelity to noiseless state",
+)
+plt.xlabel("Depolarizing probability p")
+plt.ylabel("State fidelity")
+plt.title("Depolarizing-noise state fidelities")
+plt.legend()
+plt.show()
+
+
+# %%
+
+# -----------
+# Amplitude Damping Noise
+# -----------
+
+amplitude_damping_energies = []
+amplitude_damping_exact_energy_errors = []
+amplitude_damping_noiseless_energy_errors = []
+amplitude_damping_fidelity_to_exact = []
+amplitude_damping_fidelity_to_noiseless = []
+
+for gamma in circuit_noise_list:
+    print("Investigating amplitude damping for gamma =", gamma, ".....")
+    dev_amplitude_damping = qml.device("default.mixed", wires=n_orbitals)
+
+    @qml.qnode(dev_amplitude_damping)
+    def circuit_amplitude_damping_noise(S, theta, ret_val="expval"):
+        ground_state()
+
+        for step in range(S):
+            for term in jw_U:
+                qml.exp(term, 1j * theta[step][0] / 2, num_steps=1)
+                for wire in term.wires:
+                    qml.AmplitudeDamping(gamma, wires=wire)
+            for term in jw_h:
+                qml.exp(term, 1j * theta[step][1], num_steps=1)
+                for wire in term.wires:
+                    qml.AmplitudeDamping(gamma, wires=wire)
+            for term in jw_v:
+                qml.exp(term, 1j * theta[step][2], num_steps=1)
+                for wire in term.wires:
+                    qml.AmplitudeDamping(gamma, wires=wire)
+            for term in jw_U:
+                qml.exp(term, 1j * theta[step][0] / 2, num_steps=1)
+                for wire in term.wires:
+                    qml.AmplitudeDamping(gamma, wires=wire)
+        if ret_val == "expval":
+            return qml.expval(full_Ham)
+        elif ret_val == "density_matrix":
+            return qml.density_matrix(wires=range(n_orbitals))
+
+    (
+        amplitude_best_energy,
+        amplitude_best_params,
+        amplitude_best_energy_arr,
+        amplitude_final_res,
+    ) = run_full_optimization(
+        circuit_amplitude_damping_noise,
+        S_tot,
+        optim_pts=6,
+        init_sigma=0.1,
+        greedy_n_steps=1,
+        greedy_step_scale=0.1,
+        greedy_decay_start=80,
+        powell_options=powell_options,
+        max_alternate_rounds=1,
+        alternate_n_steps=1,
+        alternate_step_scale=0.001,
+        tol=1e-9,
+        acceptance_window=30,
+        acceptance_cutoff=15,
+        step_increase_factor=1.2,
+        step_decrease_factor=0.8,
+        verbose=False,
+    )
+    amplitude_best_params_reshaped = np.reshape(amplitude_best_params, (S_tot, 3))
+
+    amplitude_damping_density_matrix = circuit_amplitude_damping_noise(
+        S_tot, amplitude_best_params_reshaped, ret_val="density_matrix"
+    )
+    amplitude_damping_energy = float(amplitude_best_energy)
+    amplitude_damping_fid_exact = float(
+        np.real(np.vdot(exact_state, amplitude_damping_density_matrix @ exact_state))
+    )
+    amplitude_damping_fid_noiseless = float(
+        np.real(
+            np.vdot(noiseless_state, amplitude_damping_density_matrix @ noiseless_state)
+        )
+    )
+
+    amplitude_damping_energies.append(amplitude_damping_energy)
+    amplitude_damping_exact_energy_errors.append(
+        amplitude_damping_energy - exact_energy
+    )
+    amplitude_damping_noiseless_energy_errors.append(
+        amplitude_damping_energy - noiseless_energy
+    )
+    amplitude_damping_fidelity_to_exact.append(amplitude_damping_fid_exact)
+    amplitude_damping_fidelity_to_noiseless.append(amplitude_damping_fid_noiseless)
+
+
+print("\nAmplitude-damping summary")
+print(
+    "gamma | energy | error_to_exact | error_to_noiseless | fid_to_exact | fid_to_noiseless"
+)
+for i, gamma in enumerate(circuit_noise_list):
+    print(
+        f"{gamma} | "
+        f"{amplitude_damping_energies[i]:.10f} | "
+        f"{amplitude_damping_exact_energy_errors[i]:.10f} | "
+        f"{amplitude_damping_noiseless_energy_errors[i]:.10f} | "
+        f"{amplitude_damping_fidelity_to_exact[i]:.10f} | "
+        f"{amplitude_damping_fidelity_to_noiseless[i]:.10f}"
+    )
+
+# %%
+
+plt.figure()
+plt.plot(
+    circuit_noise_list,
+    amplitude_damping_energies,
+    marker="o",
+    label="Amplitude-damping energy",
+)
+plt.axhline(exact_energy, linestyle="--", color="green", label="Exact energy")
+plt.axhline(
+    noiseless_energy, linestyle=":", color="orange", label="Noiseless circuit energy"
+)
+plt.xlabel("Amplitude damping gamma")
+plt.ylabel("Energy")
+plt.title("Amplitude-damping energy estimates")
+plt.legend()
+plt.show()
+
+print(amplitude_damping_energies)
+plt.figure()
+plt.plot(
+    circuit_noise_list,
+    np.abs(amplitude_damping_exact_energy_errors),
+    marker="o",
+    label="|E_amp - E_exact|",
+)
+plt.plot(
+    circuit_noise_list,
+    np.abs(amplitude_damping_noiseless_energy_errors),
+    marker="s",
+    label="|E_amp - E_noiseless|",
+)
+plt.xlabel("Amplitude damping gamma")
+plt.ylabel("Absolute energy error")
+plt.title("Amplitude-damping energy error")
+plt.legend()
+plt.show()
+
+
+plt.figure()
+plt.plot(
+    circuit_noise_list,
+    amplitude_damping_fidelity_to_exact,
+    marker="o",
+    label="Fidelity to exact state",
+)
+plt.plot(
+    circuit_noise_list,
+    amplitude_damping_fidelity_to_noiseless,
+    marker="s",
+    label="Fidelity to noiseless state",
+)
+plt.xlabel("Amplitude damping gamma")
+plt.ylabel("State fidelity")
+plt.title("Amplitude-damping state fidelities")
+plt.legend()
+plt.show()
 
 # %%
