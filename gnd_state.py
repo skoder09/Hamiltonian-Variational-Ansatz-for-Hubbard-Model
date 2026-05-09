@@ -1,3 +1,4 @@
+# %%
 import warnings
 
 import matplotlib.pyplot as plt
@@ -80,9 +81,9 @@ for h_U_i in h_U[1:]:
     h_U_total += h_U_i
 
 
-####################
 non_int_Ham = h_h_total + h_v_total
-# print("HAM: ", non_int_Ham)
+
+# %%
 
 n_orbitals = 8
 n_electrons = 4
@@ -105,13 +106,15 @@ occupation[np.argsort(eps)[:n_electrons]] = 1  # =[1 1 1 1 0 0 0 0]
 
 dev = qml.device("default.qubit", wires=n_orbitals)
 qubit_H = qml.jordan_wigner(non_int_Ham)
-full_Ham = qml.jordan_wigner(h_h_total + h_v_total + h_U_total)
+full_Ham = qml.jordan_wigner(non_int_Ham + h_U_total)
 
 
 def ground_state():
     qml.BasisState(occupation, wires=range(n_orbitals))
     qml.BasisRotation(wires=range(n_orbitals), unitary_matrix=U, check=True)
 
+
+# %%
 
 # ---------------
 # Ansatz preparation
@@ -123,12 +126,13 @@ jw_v = [qml.jordan_wigner(t) for t in h_v]
 
 
 @qml.qnode(dev)
-def circuit(S, theta):
+def circuit(S, theta, ret_val="expval"):
     """
     S: what the paper calls steps in eq. 3
     theta: a vector of form [[theta_U^1, theta_h^1, theta_v^1], ..., [theta_U^S, theta_h^S, theta_v^S]]
     """
 
+    # GS preparation
     ground_state()
 
     for step in range(S):
@@ -146,9 +150,22 @@ def circuit(S, theta):
             qml.exp(term, 1j * theta[step][0] / 2)
 
         # at this point in code, circ = e^{i*theta*h_U/2} @ e^{i*theta*h_h} @e^{i*theta*h_v} @ e^{i*theta*h_U/2}
+    if ret_val == "expval":
+        return qml.expval(full_Ham)
+    elif ret_val == "state":
+        return qml.state()
 
-    return qml.expval(full_Ham)
 
+full_Ham_matrix = qml.matrix(full_Ham, wire_order=range(n_orbitals))
+full_Ham_matrix = np.array(full_Ham_matrix, dtype=complex)
+full_E_vals, full_E_vecs = eigh(full_Ham_matrix)
+exact_ground_state_index = np.argmin(full_E_vals)
+exact_energy = float(full_E_vals[exact_ground_state_index])
+exact_state = full_E_vecs[:, exact_ground_state_index]
+
+print("Exact energy: ", exact_energy)
+
+# %%
 
 # ----------
 # INITAL PARAM. GENERATION AND CIRCUIT EVAL. FOR THOSE PARAMS.
@@ -159,8 +176,9 @@ optim_pts = 6  # from paper
 init_pts = np.random.normal(0, 0.1, (optim_pts, S_tot, 3))
 
 exp_energy = np.array([circuit(S_tot, theta) for theta in init_pts])
-print(exp_energy)
+print("Energy at initial points in parameter space: ", exp_energy)
 
+# %%
 
 # ----------
 # GREEDY NOISY SEARCH
@@ -192,6 +210,7 @@ for i in range(n_steps + 1):
 # at this point exp_energy is the lowest possible energy we could find and init_pts are the corresponding points of theta
 # print(init_pts, init_pts.shape)
 
+# %%
 # ------------
 # POWELL METHOD
 # ------------
@@ -211,7 +230,13 @@ for i in range(6):
         fun=cost_function,
         x0=init_pts[i].flatten(),
         method="Powell",
-        options={"disp": True, "maxiter": 1000},
+        options={
+            "disp": True,
+            "maxiter": 100,
+            "maxfev": 100,
+            "xtol": 1e-9,
+            "ftol": 1e-9,
+        },
     )
 
     if final_res == None:
@@ -231,12 +256,13 @@ print(f"Lowest Energy: {best_energy:.10f}")
 print(f"Best parameters: {best_params}")
 
 
+# %%
 # -----------
 # ALTERNATE BETWEEN GREEDY SEARCH AND POWELL
 # -----------
 
 n_steps = 150
-step_scale = 0.5
+step_scale = 0.001
 prev_best_energy = 1000000
 
 tol = 1e-9
@@ -275,7 +301,7 @@ for _ in range(10):
                 current_step_scale *= step_increase_factor
             else:
                 current_step_scale *= step_decrease_factor
-            print(acceptance_count)
+
             acceptance_count = 0
 
     # POWELL:
@@ -283,7 +309,13 @@ for _ in range(10):
         fun=cost_function,
         x0=init_pts.flatten(),
         method="Powell",
-        options={"disp": True, "maxiter": 1000},
+        options={
+            "disp": True,
+            "maxiter": 100,
+            "maxfev": 100,
+            "xtol": 1e-9,
+            "ftol": 1e-9,
+        },
     )
 
     best_energy = result.fun
@@ -313,3 +345,116 @@ plt.ylabel("Best Energy")
 plt.show()
 
 print(best_energy_arr)
+# %%
+
+# -----------
+# SHOT NOISE ANALYSIS
+# -----------
+
+best_params_reshaped = np.reshape(best_params, (S_tot, 3))
+noiseless_energy = circuit(S_tot, best_params_reshaped)
+
+
+noiseless_state = circuit(S_tot, best_params_reshaped, ret_val="state")
+fidelity_to_exact_state = np.abs(np.vdot(exact_state, noiseless_state)) ** 2
+fidelity_to_noiseless_state = np.abs(np.vdot(noiseless_state, noiseless_state)) ** 2
+
+
+print("Noiseless energy:", noiseless_energy)
+print("Fidelity to exact state:", fidelity_to_exact_state)
+print("Fidelity to noiseless state:", fidelity_to_noiseless_state)
+
+# %%
+shot_list = [100, 1000, 10000, 50000, 100000]
+n_shot_repeats = 30
+
+shot_mean_energies = []
+shot_std_energies = []
+exact_energy_errors = []
+noiseless_energy_errors = []
+
+for shots in shot_list:
+    dev_shot = qml.device("default.qubit", wires=n_orbitals, shots=shots)
+
+    @qml.qnode(dev_shot)
+    def circuit_shot_noise(S, theta, ret_val="expval"):
+        ground_state()
+
+        for step in range(S):
+            for term in jw_U:
+                qml.exp(term, 1j * theta[step][0] / 2)
+            for term in jw_h:
+                qml.exp(term, 1j * theta[step][1])
+            for term in jw_v:
+                qml.exp(term, 1j * theta[step][2])
+            for term in jw_U:
+                qml.exp(term, 1j * theta[step][0] / 2)
+
+        if ret_val == "expval":
+            return qml.expval(full_Ham)
+        elif ret_val == "samples":
+            return qml.sample(wires=range(n_orbitals))
+
+    sampled_energies = np.array(
+        [circuit_shot_noise(S_tot, best_params_reshaped) for _ in range(n_shot_repeats)]
+    )
+
+    mean_energy = float(np.mean(sampled_energies))
+    std_energy = float(np.std(sampled_energies))
+
+    shot_mean_energies.append(mean_energy)
+    shot_std_energies.append(std_energy)
+    exact_energy_errors.append(mean_energy - exact_energy)
+    noiseless_energy_errors.append(mean_energy - noiseless_energy)
+
+
+print("\nShot-noise summary")
+print("shots | mean_energy | stddev_energy | error_to_exact | error_to_noiseless ")
+for i, shots in enumerate(shot_list):
+    print(
+        f"{shots} | "
+        f"{shot_mean_energies[i]:.10f} | "
+        f"{shot_std_energies[i]:.10f} | "
+        f"{exact_energy_errors[i]:.10f} | "
+        f"{noiseless_energy_errors[i]:.10f} | "
+    )
+# %%
+
+plt.figure()
+plt.errorbar(
+    shot_list,
+    shot_mean_energies,
+    yerr=shot_std_energies,
+    marker="o",
+    capsize=4,
+    label="Shot-based energy estimate",
+)
+plt.axhline(exact_energy, linestyle="--", color="green", label="Exact energy")
+plt.axhline(
+    noiseless_energy, linestyle=":", color="orange", label="Noiseless circuit energy"
+)
+plt.xscale("log")
+plt.xlabel("Shots")
+plt.ylabel("Estimated energy")
+plt.title("Shot-noise energy estimates")
+plt.legend()
+plt.show()
+
+
+plt.figure()
+plt.plot(shot_list, np.abs(exact_energy_errors), marker="o", label="|E_shot - E_exact|")
+plt.plot(
+    shot_list,
+    np.abs(noiseless_energy_errors),
+    marker="s",
+    label="|E_shot - E_noiseless|",
+)
+plt.xscale("log")
+plt.xlabel("Shots")
+plt.ylabel("Absolute energy error")
+plt.title("Shot-noise energy error")
+plt.legend()
+plt.show()
+
+
+# %%
