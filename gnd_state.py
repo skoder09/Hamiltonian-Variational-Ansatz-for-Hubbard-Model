@@ -851,3 +851,155 @@ plt.legend()
 plt.show()
 
 # %%
+
+# -----------
+# READOUT NOISE ANALYSIS
+# -----------
+
+readout_error_list = [0.01, 0.02, 0.03]
+readout_shots = 10
+n_readout_repeats = 3
+
+# %%
+
+# -----------
+# Readout Error
+# -----------
+
+readout_mean_energies = []
+readout_std_energies = []
+readout_exact_energy_errors = []
+readout_noiseless_energy_errors = []
+
+for readout_prob in readout_error_list:
+    print("Investigating readout error for p =", readout_prob, ".....")
+    dev_readout = qml.device(
+        "default.mixed",
+        wires=n_orbitals,
+        shots=readout_shots,
+        readout_prob=readout_prob,
+    )
+
+    @qml.qnode(dev_readout)
+    def circuit_readout_noise(S, theta, ret_val="expval"):
+        ground_state()
+
+        for step in range(S):
+            for term in jw_U:
+                qml.exp(term, 1j * theta[step][0] / 2, num_steps=1)
+            for term in jw_h:
+                qml.exp(term, 1j * theta[step][1], num_steps=1)
+            for term in jw_v:
+                qml.exp(term, 1j * theta[step][2], num_steps=1)
+            for term in jw_U:
+                qml.exp(term, 1j * theta[step][0] / 2, num_steps=1)
+
+        if ret_val == "expval":
+            return qml.expval(full_Ham)
+        elif ret_val == "samples":
+            return qml.sample(wires=range(n_orbitals))
+
+    powell_options = {
+        "disp": True,
+        "maxiter": 2,
+        "maxfev": 2,
+        "xtol": 1e-1,
+        "ftol": 1e-1,
+    }
+
+    (
+        readout_best_energy,
+        readout_best_params,
+        readout_best_energy_arr,
+        readout_final_res,
+    ) = run_full_optimization(
+        circuit_readout_noise,
+        S_tot,
+        optim_pts=6,
+        init_sigma=0.1,
+        greedy_n_steps=1,
+        greedy_step_scale=0.1,
+        greedy_decay_start=80,
+        powell_options=powell_options,
+        max_alternate_rounds=1,
+        alternate_n_steps=1,
+        alternate_step_scale=0.001,
+        tol=1e-9,
+        acceptance_window=30,
+        acceptance_cutoff=15,
+        step_increase_factor=1.2,
+        step_decrease_factor=0.8,
+        verbose=True,
+    )
+
+    readout_best_params_reshaped = np.reshape(readout_best_params, (S_tot, 3))
+
+    sampled_energies = np.array(
+        [
+            circuit_readout_noise(S_tot, readout_best_params_reshaped)
+            for _ in range(n_readout_repeats)
+        ]
+    )
+
+    mean_energy = float(np.mean(sampled_energies))
+    std_energy = float(np.std(sampled_energies))
+
+    readout_mean_energies.append(mean_energy)
+    readout_std_energies.append(std_energy)
+    readout_exact_energy_errors.append(mean_energy - exact_energy)
+    readout_noiseless_energy_errors.append(mean_energy - noiseless_energy)
+
+
+print("\nReadout-noise summary")
+print("p | mean_energy | stddev_energy | error_to_exact | error_to_noiseless")
+for i, readout_prob in enumerate(readout_error_list):
+    print(
+        f"{readout_prob} | "
+        f"{readout_mean_energies[i]:.10f} | "
+        f"{readout_std_energies[i]:.10f} | "
+        f"{readout_exact_energy_errors[i]:.10f} | "
+        f"{readout_noiseless_energy_errors[i]:.10f}"
+    )
+
+# %%
+
+plt.figure()
+plt.errorbar(
+    readout_error_list,
+    readout_mean_energies,
+    yerr=readout_std_energies,
+    marker="o",
+    capsize=4,
+    label="Readout-noisy energy estimate",
+)
+plt.axhline(exact_energy, linestyle="--", color="green", label="Exact energy")
+plt.axhline(
+    noiseless_energy, linestyle=":", color="orange", label="Noiseless circuit energy"
+)
+plt.xlabel("Readout error probability")
+plt.ylabel("Estimated energy")
+plt.title("Readout-noise energy estimates")
+plt.legend()
+plt.show()
+
+
+plt.figure()
+plt.plot(
+    readout_error_list,
+    np.abs(readout_exact_energy_errors),
+    marker="o",
+    label="|E_readout - E_exact|",
+)
+plt.plot(
+    readout_error_list,
+    np.abs(readout_noiseless_energy_errors),
+    marker="s",
+    label="|E_readout - E_noiseless|",
+)
+plt.xlabel("Readout error probability")
+plt.ylabel("Absolute energy error")
+plt.title("Readout-noise energy error")
+plt.legend()
+plt.show()
+
+# %%
