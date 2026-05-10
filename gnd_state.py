@@ -853,6 +853,376 @@ plt.show()
 # %%
 
 # -----------
+# ROUTING OVERHEAD ANALYSIS
+# -----------
+
+from qiskit import QuantumCircuit, transpile
+from qiskit.circuit.library import UnitaryGate
+from qiskit.quantum_info import DensityMatrix
+from qiskit.transpiler import CouplingMap
+from qiskit_aer import AerSimulator
+from qiskit_aer.noise import depolarizing_error
+
+tuna9_edges = [
+    (0, 1),
+    (0, 2),
+    (1, 3),
+    (1, 4),
+    (2, 4),
+    (2, 5),
+    (3, 6),
+    (4, 6),
+    (4, 7),
+    (5, 7),
+    (6, 8),
+    (7, 8),
+]
+tuna9_coupling_map = CouplingMap(tuna9_edges)
+tuna9_coupling_map.make_symmetric()
+
+tuna9_basis_gates = ["rx", "ry", "rz", "x", "y", "z", "s", "sdg", "t", "tdg", "id", "cz"]
+routing_noise_list = [0.01, 0.005, 0.001]
+routing_initial_layout = list(range(9))
+routing_seed = 1234
+routing_optimization_level = 1
+
+# %%
+
+
+def _pauli_label_and_coeffs(operator):
+    coeffs, pauli_words = operator.terms()
+    labels = []
+
+    for pauli_word in pauli_words:
+        label = ["I"] * n_orbitals
+        for op in pauli_word:
+            if op.name in ["PauliX", "X"]:
+                label[op.wires[0]] = "X"
+            elif op.name in ["PauliY", "Y"]:
+                label[op.wires[0]] = "Y"
+            elif op.name in ["PauliZ", "Z"]:
+                label[op.wires[0]] = "Z"
+        labels.append("".join(label))
+
+    return list(zip(coeffs, labels))
+
+
+def _apply_pauli_exp(qc, pauli_label, angle):
+    active_qubits = [i for i, char in enumerate(pauli_label) if char != "I"]
+
+    if not active_qubits:
+        return
+
+    for qubit in active_qubits:
+        if pauli_label[qubit] == "X":
+            qc.ry(np.pi / 2, qubit)
+        elif pauli_label[qubit] == "Y":
+            qc.rx(-np.pi / 2, qubit)
+
+    target = active_qubits[-1]
+    for qubit in active_qubits[:-1]:
+        qc.cx(qubit, target)
+
+    qc.rz(-2 * angle, target)
+
+    for qubit in reversed(active_qubits[:-1]):
+        qc.cx(qubit, target)
+
+    for qubit in reversed(active_qubits):
+        if pauli_label[qubit] == "X":
+            qc.ry(-np.pi / 2, qubit)
+        elif pauli_label[qubit] == "Y":
+            qc.rx(np.pi / 2, qubit)
+
+
+def _append_term_marker(qc, term_qubits):
+    if term_qubits:
+        qc.barrier(*sorted(term_qubits))
+
+
+def _apply_hubbard_term_block(qc, term, theta_value):
+    term_qubits = set()
+
+    for coeff, pauli_label in _pauli_label_and_coeffs(term):
+        active_qubits = [i for i, char in enumerate(pauli_label) if char != "I"]
+        term_qubits.update(active_qubits)
+        _apply_pauli_exp(qc, pauli_label, np.real(coeff) * theta_value)
+
+    _append_term_marker(qc, term_qubits)
+
+
+def build_qiskit_ansatz(theta):
+    qc = QuantumCircuit(9)
+
+    for qubit, occupied in enumerate(occupation):
+        if occupied:
+            qc.x(qubit)
+
+    qc.append(UnitaryGate(U, label="basis_rotation"), list(range(n_orbitals)))
+
+    for step in range(S_tot):
+        for term in jw_U:
+            _apply_hubbard_term_block(qc, term, theta[step][0] / 2)
+        for term in jw_h:
+            _apply_hubbard_term_block(qc, term, theta[step][1])
+        for term in jw_v:
+            _apply_hubbard_term_block(qc, term, theta[step][2])
+        for term in jw_U:
+            _apply_hubbard_term_block(qc, term, theta[step][0] / 2)
+
+    return qc
+
+
+# %%
+
+
+def transpile_unrouted(qc):
+    return transpile(
+        qc,
+        basis_gates=tuna9_basis_gates,
+        optimization_level=routing_optimization_level,
+        seed_transpiler=routing_seed,
+    )
+
+
+def transpile_routed(qc):
+    return transpile(
+        qc,
+        basis_gates=tuna9_basis_gates,
+        coupling_map=tuna9_coupling_map,
+        initial_layout=routing_initial_layout,
+        layout_method="trivial",
+        routing_method="sabre",
+        optimization_level=routing_optimization_level,
+        seed_transpiler=routing_seed,
+    )
+
+
+def add_term_noise_after_markers(qc, p):
+    if p == 0:
+        return qc
+
+    noisy_qc = QuantumCircuit(qc.num_qubits, qc.num_clbits)
+    one_qubit_error = depolarizing_error(p, 1).to_instruction()
+
+    for instruction in qc.data:
+        operation = instruction.operation
+        qubit_indices = [qc.find_bit(qubit).index for qubit in instruction.qubits]
+        clbit_indices = [qc.find_bit(clbit).index for clbit in instruction.clbits]
+
+        if operation.name == "barrier":
+            for qubit in qubit_indices:
+                noisy_qc.append(one_qubit_error, [qubit])
+        else:
+            noisy_qc.append(
+                operation,
+                [noisy_qc.qubits[i] for i in qubit_indices],
+                [noisy_qc.clbits[i] for i in clbit_indices],
+            )
+
+    return noisy_qc
+
+
+def _two_qubit_count(qc):
+    return sum(
+        count
+        for gate, count in qc.count_ops().items()
+        if gate in ["cx", "cz", "swap", "rxx", "ryy", "rzz"]
+    )
+
+
+def routing_metrics(unrouted_qc, routed_qc):
+    unrouted_two_qubit = _two_qubit_count(unrouted_qc)
+    routed_two_qubit = _two_qubit_count(routed_qc)
+
+    return {
+        "unrouted_depth": unrouted_qc.depth(),
+        "routed_depth": routed_qc.depth(),
+        "added_depth": routed_qc.depth() - unrouted_qc.depth(),
+        "unrouted_2q": unrouted_two_qubit,
+        "routed_2q": routed_two_qubit,
+        "added_2q": routed_two_qubit - unrouted_two_qubit,
+        "routed_swaps": routed_qc.count_ops().get("swap", 0),
+    }
+
+
+def simulate_density_matrix(qc):
+    qc_to_run = qc.copy()
+    qc_to_run.save_density_matrix()
+    result = AerSimulator(method="density_matrix").run(qc_to_run).result()
+    return np.asarray(result.data(0)["density_matrix"], dtype=complex)
+
+
+def density_matrix_energy(rho):
+    return float(np.real(np.trace(rho[: 2**n_orbitals, : 2**n_orbitals] @ full_Ham_matrix)))
+
+
+def density_matrix_fidelity(rho, state):
+    rho8 = rho[: 2**n_orbitals, : 2**n_orbitals]
+    return float(np.real(np.vdot(state, rho8 @ state)))
+
+
+def routing_energy(S, theta, p=0.001, routed=True):
+    theta = np.reshape(theta, (S, 3))
+    qc = build_qiskit_ansatz(theta)
+    transpiled_qc = transpile_routed(qc) if routed else transpile_unrouted(qc)
+    noisy_qc = add_term_noise_after_markers(transpiled_qc, p)
+    return density_matrix_energy(simulate_density_matrix(noisy_qc))
+
+
+# %%
+
+routing_noise_p = 0.001
+
+
+def circuit_routed_noisy(S, theta):
+    return routing_energy(S, theta, p=routing_noise_p, routed=True)
+
+
+def circuit_unrouted_noisy(S, theta):
+    return routing_energy(S, theta, p=routing_noise_p, routed=False)
+
+
+routing_powell_options = {
+    "disp": True,
+    "maxiter": 2,
+    "maxfev": 2,
+    "xtol": 1e-1,
+    "ftol": 1e-1,
+}
+
+(
+    routed_best_energy,
+    routed_best_params,
+    routed_best_energy_arr,
+    routed_final_res,
+) = run_full_optimization(
+    circuit_routed_noisy,
+    S_tot,
+    optim_pts=6,
+    init_sigma=0.1,
+    greedy_n_steps=1,
+    greedy_step_scale=0.1,
+    greedy_decay_start=80,
+    powell_options=routing_powell_options,
+    max_alternate_rounds=1,
+    alternate_n_steps=1,
+    alternate_step_scale=0.001,
+    tol=1e-9,
+    acceptance_window=30,
+    acceptance_cutoff=15,
+    step_increase_factor=1.2,
+    step_decrease_factor=0.8,
+    verbose=True,
+)
+
+(
+    unrouted_best_energy,
+    unrouted_best_params,
+    unrouted_best_energy_arr,
+    unrouted_final_res,
+) = run_full_optimization(
+    circuit_unrouted_noisy,
+    S_tot,
+    optim_pts=6,
+    init_sigma=0.1,
+    greedy_n_steps=1,
+    greedy_step_scale=0.1,
+    greedy_decay_start=80,
+    powell_options=routing_powell_options,
+    max_alternate_rounds=1,
+    alternate_n_steps=1,
+    alternate_step_scale=0.001,
+    tol=1e-9,
+    acceptance_window=30,
+    acceptance_cutoff=15,
+    step_increase_factor=1.2,
+    step_decrease_factor=0.8,
+    verbose=True,
+)
+
+# %%
+
+routed_params_reshaped = np.reshape(routed_best_params, (S_tot, 3))
+unrouted_params_reshaped = np.reshape(unrouted_best_params, (S_tot, 3))
+
+routed_logical_qc = build_qiskit_ansatz(routed_params_reshaped)
+unrouted_logical_qc = build_qiskit_ansatz(unrouted_params_reshaped)
+
+routed_unrouted_basis_qc = transpile_unrouted(routed_logical_qc)
+routed_tuna_qc = transpile_routed(routed_logical_qc)
+unrouted_basis_qc = transpile_unrouted(unrouted_logical_qc)
+
+routing_overhead = routing_metrics(routed_unrouted_basis_qc, routed_tuna_qc)
+routed_rho = simulate_density_matrix(
+    add_term_noise_after_markers(routed_tuna_qc, routing_noise_p)
+)
+unrouted_rho = simulate_density_matrix(
+    add_term_noise_after_markers(unrouted_basis_qc, routing_noise_p)
+)
+
+routed_fid_exact = density_matrix_fidelity(routed_rho, exact_state)
+routed_fid_noiseless = density_matrix_fidelity(routed_rho, noiseless_state)
+unrouted_fid_exact = density_matrix_fidelity(unrouted_rho, exact_state)
+unrouted_fid_noiseless = density_matrix_fidelity(unrouted_rho, noiseless_state)
+
+print("\nRouting-overhead summary")
+print("case | energy | error_to_exact | error_to_noiseless | fid_to_exact | fid_to_noiseless")
+print(
+    f"routed | {routed_best_energy:.10f} | "
+    f"{routed_best_energy - exact_energy:.10f} | "
+    f"{routed_best_energy - noiseless_energy:.10f} | "
+    f"{routed_fid_exact:.10f} | {routed_fid_noiseless:.10f}"
+)
+print(
+    f"unrouted_noisy | {unrouted_best_energy:.10f} | "
+    f"{unrouted_best_energy - exact_energy:.10f} | "
+    f"{unrouted_best_energy - noiseless_energy:.10f} | "
+    f"{unrouted_fid_exact:.10f} | {unrouted_fid_noiseless:.10f}"
+)
+print("\nRouting structural metrics")
+for key, value in routing_overhead.items():
+    print(key, ":", value)
+
+# %%
+
+plt.figure()
+plt.bar(["unrouted noisy", "routed noisy"], [unrouted_best_energy, routed_best_energy])
+plt.axhline(exact_energy, linestyle="--", color="green", label="Exact energy")
+plt.axhline(noiseless_energy, linestyle=":", color="orange", label="Noiseless energy")
+plt.ylabel("Energy")
+plt.title("Routing-overhead energy comparison")
+plt.legend()
+plt.show()
+
+
+plt.figure()
+plt.bar(
+    ["unrouted exact", "routed exact", "unrouted noiseless", "routed noiseless"],
+    [unrouted_fid_exact, routed_fid_exact, unrouted_fid_noiseless, routed_fid_noiseless],
+)
+plt.ylabel("State fidelity")
+plt.title("Routing-overhead fidelity comparison")
+plt.xticks(rotation=20)
+plt.show()
+
+
+plt.figure()
+plt.bar(
+    ["added depth", "added 2Q", "routed SWAP"],
+    [
+        routing_overhead["added_depth"],
+        routing_overhead["added_2q"],
+        routing_overhead["routed_swaps"],
+    ],
+)
+plt.ylabel("Count")
+plt.title("Routing structural overhead")
+plt.show()
+
+# %%
+
+# -----------
 # READOUT NOISE ANALYSIS
 # -----------
 
