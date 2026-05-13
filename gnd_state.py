@@ -880,7 +880,20 @@ tuna9_edges = [
 tuna9_coupling_map = CouplingMap(tuna9_edges)
 tuna9_coupling_map.make_symmetric()
 
-tuna9_basis_gates = ["rx", "ry", "rz", "x", "y", "z", "s", "sdg", "t", "tdg", "id", "cz"]
+tuna9_basis_gates = [
+    "rx",
+    "ry",
+    "rz",
+    "x",
+    "y",
+    "z",
+    "s",
+    "sdg",
+    "t",
+    "tdg",
+    "id",
+    "cz",
+]
 routing_noise_list = [0.01, 0.005, 0.001]
 routing_initial_layout = list(range(9))
 routing_seed = 1234
@@ -889,487 +902,74 @@ routing_optimization_level = 1
 # %%
 
 
-def _pauli_label_and_coeffs(operator):
-    coeffs, pauli_words = operator.terms()
-    labels = []
+# -----------------------------------------------------------------------------
+# QISKIT EQUIVALENT: Build a Qiskit QuantumCircuit that mirrors the PennyLane
+# `circuit(S, theta)` qnode above. This function is intentionally monolithic
+# and appended at the bottom of the file so it can be used for routing /
+# transpilation analysis on the `tuna-9` coupling map.
+# -----------------------------------------------------------------------------
 
-    for pauli_word in pauli_words:
-        label = ["I"] * n_orbitals
-        for op in pauli_word:
-            if op.name in ["PauliX", "X"]:
-                label[op.wires[0]] = "X"
-            elif op.name in ["PauliY", "Y"]:
-                label[op.wires[0]] = "Y"
-            elif op.name in ["PauliZ", "Z"]:
-                label[op.wires[0]] = "Z"
-        labels.append("".join(label))
-
-    return list(zip(coeffs, labels))
+from scipy.linalg import expm
 
 
-def _apply_pauli_exp(qc, pauli_label, angle):
-    active_qubits = [i for i, char in enumerate(pauli_label) if char != "I"]
+def build_qiskit_equivalent_circuit(S, theta):
+    # Basic validation and conversion
+    theta = np.array(theta, dtype=float)
+    if S == 0:
+        # allow theta to be (1,3) or (0,3); it will be unused when S==0
+        pass
+    else:
+        if theta.shape != (S, 3):
+            raise ValueError("theta must have shape (S, 3) for the given S")
 
-    if not active_qubits:
-        return
-
-    for qubit in active_qubits:
-        if pauli_label[qubit] == "X":
-            qc.ry(np.pi / 2, qubit)
-        elif pauli_label[qubit] == "Y":
-            qc.rx(-np.pi / 2, qubit)
-
-    target = active_qubits[-1]
-    for qubit in active_qubits[:-1]:
-        qc.cx(qubit, target)
-
-    qc.rz(-2 * angle, target)
-
-    for qubit in reversed(active_qubits[:-1]):
-        qc.cx(qubit, target)
-
-    for qubit in reversed(active_qubits):
-        if pauli_label[qubit] == "X":
-            qc.ry(-np.pi / 2, qubit)
-        elif pauli_label[qubit] == "Y":
-            qc.rx(np.pi / 2, qubit)
-
-
-def _append_term_marker(qc, term_qubits):
-    if term_qubits:
-        qc.barrier(*sorted(term_qubits))
-
-
-def _apply_hubbard_term_block(qc, term, theta_value):
-    term_qubits = set()
-
-    for coeff, pauli_label in _pauli_label_and_coeffs(term):
-        active_qubits = [i for i, char in enumerate(pauli_label) if char != "I"]
-        term_qubits.update(active_qubits)
-        _apply_pauli_exp(qc, pauli_label, np.real(coeff) * theta_value)
-
-    _append_term_marker(qc, term_qubits)
-
-
-def build_qiskit_ansatz(theta):
+    # Build a 9-qubit circuit so we can map onto tuna-9 (last qubit unused)
     qc = QuantumCircuit(9)
 
-    for qubit, occupied in enumerate(occupation):
-        if occupied:
-            qc.x(qubit)
+    # 1) Prepare ground state using existing PennyLane ground_state() / qnode
+    # Ask the PennyLane qnode for the statevector after GS preparation only.
+    # We call the existing `circuit` qnode with S=0 (no ansatz layers) and ask
+    # for the statevector. This re-uses the `ground_state()` implementation above.
+    ground_sv = circuit(0, np.zeros((1, 3)), ret_val="state")
 
-    qc.append(UnitaryGate(U, label="basis_rotation"), list(range(n_orbitals)))
+    # Initialize the first `n_orbitals` qubits with that statevector.
+    qc.initialize(ground_sv, list(range(n_orbitals)))
 
-    for step in range(S_tot):
+    # 2) For each ansatz layer, append exponentials of JW-mapped terms as dense
+    # unitaries. We compute the dense matrix for each jw term on-the-fly using
+    # pennylane's qml.matrix(..., wire_order=range(n_orbitals)).
+    for step in range(S):
+        # U half-layer
         for term in jw_U:
-            _apply_hubbard_term_block(qc, term, theta[step][0] / 2)
+            # fix, why make a qml matrix first, then convert to numpy and then to qiskit?
+            M = np.array(qml.matrix(term, wire_order=range(n_orbitals)), dtype=complex)
+            Umat = expm(1j * theta[step][0] / 2.0 * M)
+            qc.append(UnitaryGate(Umat), list(range(n_orbitals)))
+
+        # h full-layer
         for term in jw_h:
-            _apply_hubbard_term_block(qc, term, theta[step][1])
+            M = np.array(qml.matrix(term, wire_order=range(n_orbitals)), dtype=complex)
+            Umat = expm(1j * theta[step][1] * M)
+            qc.append(UnitaryGate(Umat), list(range(n_orbitals)))
+
+        # v full-layer
         for term in jw_v:
-            _apply_hubbard_term_block(qc, term, theta[step][2])
+            M = np.array(qml.matrix(term, wire_order=range(n_orbitals)), dtype=complex)
+            Umat = expm(1j * theta[step][2] * M)
+            qc.append(UnitaryGate(Umat), list(range(n_orbitals)))
+
+        # U half-layer (again)
         for term in jw_U:
-            _apply_hubbard_term_block(qc, term, theta[step][0] / 2)
+            M = np.array(qml.matrix(term, wire_order=range(n_orbitals)), dtype=complex)
+            Umat = expm(1j * theta[step][0] / 2.0 * M)
+            qc.append(UnitaryGate(Umat), list(range(n_orbitals)))
 
     return qc
 
 
-# %%
-
-
-def transpile_unrouted(qc):
-    return transpile(
-        qc,
-        basis_gates=tuna9_basis_gates,
-        optimization_level=routing_optimization_level,
-        seed_transpiler=routing_seed,
-    )
-
-
-def transpile_routed(qc):
-    return transpile(
-        qc,
-        basis_gates=tuna9_basis_gates,
-        coupling_map=tuna9_coupling_map,
-        initial_layout=routing_initial_layout,
-        layout_method="trivial",
-        routing_method="sabre",
-        optimization_level=routing_optimization_level,
-        seed_transpiler=routing_seed,
-    )
-
-
-def add_term_noise_after_markers(qc, p):
-    if p == 0:
-        return qc
-
-    noisy_qc = QuantumCircuit(qc.num_qubits, qc.num_clbits)
-    one_qubit_error = depolarizing_error(p, 1).to_instruction()
-
-    for instruction in qc.data:
-        operation = instruction.operation
-        qubit_indices = [qc.find_bit(qubit).index for qubit in instruction.qubits]
-        clbit_indices = [qc.find_bit(clbit).index for clbit in instruction.clbits]
-
-        if operation.name == "barrier":
-            for qubit in qubit_indices:
-                noisy_qc.append(one_qubit_error, [qubit])
-        else:
-            noisy_qc.append(
-                operation,
-                [noisy_qc.qubits[i] for i in qubit_indices],
-                [noisy_qc.clbits[i] for i in clbit_indices],
-            )
-
-    return noisy_qc
-
-
-def _two_qubit_count(qc):
-    return sum(
-        count
-        for gate, count in qc.count_ops().items()
-        if gate in ["cx", "cz", "swap", "rxx", "ryy", "rzz"]
-    )
-
-
-def routing_metrics(unrouted_qc, routed_qc):
-    unrouted_two_qubit = _two_qubit_count(unrouted_qc)
-    routed_two_qubit = _two_qubit_count(routed_qc)
-
-    return {
-        "unrouted_depth": unrouted_qc.depth(),
-        "routed_depth": routed_qc.depth(),
-        "added_depth": routed_qc.depth() - unrouted_qc.depth(),
-        "unrouted_2q": unrouted_two_qubit,
-        "routed_2q": routed_two_qubit,
-        "added_2q": routed_two_qubit - unrouted_two_qubit,
-        "routed_swaps": routed_qc.count_ops().get("swap", 0),
-    }
-
-
-def simulate_density_matrix(qc):
-    qc_to_run = qc.copy()
-    qc_to_run.save_density_matrix()
-    result = AerSimulator(method="density_matrix").run(qc_to_run).result()
-    return np.asarray(result.data(0)["density_matrix"], dtype=complex)
-
-
-def density_matrix_energy(rho):
-    return float(np.real(np.trace(rho[: 2**n_orbitals, : 2**n_orbitals] @ full_Ham_matrix)))
-
-
-def density_matrix_fidelity(rho, state):
-    rho8 = rho[: 2**n_orbitals, : 2**n_orbitals]
-    return float(np.real(np.vdot(state, rho8 @ state)))
-
-
-def routing_energy(S, theta, p=0.001, routed=True):
-    theta = np.reshape(theta, (S, 3))
-    qc = build_qiskit_ansatz(theta)
-    transpiled_qc = transpile_routed(qc) if routed else transpile_unrouted(qc)
-    noisy_qc = add_term_noise_after_markers(transpiled_qc, p)
-    return density_matrix_energy(simulate_density_matrix(noisy_qc))
-
-
-# %%
-
-routing_noise_p = 0.001
-
-
-def circuit_routed_noisy(S, theta):
-    return routing_energy(S, theta, p=routing_noise_p, routed=True)
-
-
-def circuit_unrouted_noisy(S, theta):
-    return routing_energy(S, theta, p=routing_noise_p, routed=False)
-
-
-routing_powell_options = {
-    "disp": True,
-    "maxiter": 2,
-    "maxfev": 2,
-    "xtol": 1e-1,
-    "ftol": 1e-1,
-}
-
-(
-    routed_best_energy,
-    routed_best_params,
-    routed_best_energy_arr,
-    routed_final_res,
-) = run_full_optimization(
-    circuit_routed_noisy,
-    S_tot,
-    optim_pts=6,
-    init_sigma=0.1,
-    greedy_n_steps=1,
-    greedy_step_scale=0.1,
-    greedy_decay_start=80,
-    powell_options=routing_powell_options,
-    max_alternate_rounds=1,
-    alternate_n_steps=1,
-    alternate_step_scale=0.001,
-    tol=1e-9,
-    acceptance_window=30,
-    acceptance_cutoff=15,
-    step_increase_factor=1.2,
-    step_decrease_factor=0.8,
-    verbose=True,
-)
-
-(
-    unrouted_best_energy,
-    unrouted_best_params,
-    unrouted_best_energy_arr,
-    unrouted_final_res,
-) = run_full_optimization(
-    circuit_unrouted_noisy,
-    S_tot,
-    optim_pts=6,
-    init_sigma=0.1,
-    greedy_n_steps=1,
-    greedy_step_scale=0.1,
-    greedy_decay_start=80,
-    powell_options=routing_powell_options,
-    max_alternate_rounds=1,
-    alternate_n_steps=1,
-    alternate_step_scale=0.001,
-    tol=1e-9,
-    acceptance_window=30,
-    acceptance_cutoff=15,
-    step_increase_factor=1.2,
-    step_decrease_factor=0.8,
-    verbose=True,
-)
-
-# %%
-
-routed_params_reshaped = np.reshape(routed_best_params, (S_tot, 3))
-unrouted_params_reshaped = np.reshape(unrouted_best_params, (S_tot, 3))
-
-routed_logical_qc = build_qiskit_ansatz(routed_params_reshaped)
-unrouted_logical_qc = build_qiskit_ansatz(unrouted_params_reshaped)
-
-routed_unrouted_basis_qc = transpile_unrouted(routed_logical_qc)
-routed_tuna_qc = transpile_routed(routed_logical_qc)
-unrouted_basis_qc = transpile_unrouted(unrouted_logical_qc)
-
-routing_overhead = routing_metrics(routed_unrouted_basis_qc, routed_tuna_qc)
-routed_rho = simulate_density_matrix(
-    add_term_noise_after_markers(routed_tuna_qc, routing_noise_p)
-)
-unrouted_rho = simulate_density_matrix(
-    add_term_noise_after_markers(unrouted_basis_qc, routing_noise_p)
-)
-
-routed_fid_exact = density_matrix_fidelity(routed_rho, exact_state)
-routed_fid_noiseless = density_matrix_fidelity(routed_rho, noiseless_state)
-unrouted_fid_exact = density_matrix_fidelity(unrouted_rho, exact_state)
-unrouted_fid_noiseless = density_matrix_fidelity(unrouted_rho, noiseless_state)
-
-print("\nRouting-overhead summary")
-print("case | energy | error_to_exact | error_to_noiseless | fid_to_exact | fid_to_noiseless")
-print(
-    f"routed | {routed_best_energy:.10f} | "
-    f"{routed_best_energy - exact_energy:.10f} | "
-    f"{routed_best_energy - noiseless_energy:.10f} | "
-    f"{routed_fid_exact:.10f} | {routed_fid_noiseless:.10f}"
-)
-print(
-    f"unrouted_noisy | {unrouted_best_energy:.10f} | "
-    f"{unrouted_best_energy - exact_energy:.10f} | "
-    f"{unrouted_best_energy - noiseless_energy:.10f} | "
-    f"{unrouted_fid_exact:.10f} | {unrouted_fid_noiseless:.10f}"
-)
-print("\nRouting structural metrics")
-for key, value in routing_overhead.items():
-    print(key, ":", value)
-
-# %%
-
-plt.figure()
-plt.bar(["unrouted noisy", "routed noisy"], [unrouted_best_energy, routed_best_energy])
-plt.axhline(exact_energy, linestyle="--", color="green", label="Exact energy")
-plt.axhline(noiseless_energy, linestyle=":", color="orange", label="Noiseless energy")
-plt.ylabel("Energy")
-plt.title("Routing-overhead energy comparison")
-plt.legend()
-plt.show()
-
-
-plt.figure()
-plt.bar(
-    ["unrouted exact", "routed exact", "unrouted noiseless", "routed noiseless"],
-    [unrouted_fid_exact, routed_fid_exact, unrouted_fid_noiseless, routed_fid_noiseless],
-)
-plt.ylabel("State fidelity")
-plt.title("Routing-overhead fidelity comparison")
-plt.xticks(rotation=20)
-plt.show()
-
-
-plt.figure()
-plt.bar(
-    ["added depth", "added 2Q", "routed SWAP"],
-    [
-        routing_overhead["added_depth"],
-        routing_overhead["added_2q"],
-        routing_overhead["routed_swaps"],
-    ],
-)
-plt.ylabel("Count")
-plt.title("Routing structural overhead")
-plt.show()
-
-# %%
-
-# -----------
-# READOUT NOISE ANALYSIS
-# -----------
-
-readout_error_list = [0.01, 0.02, 0.03]
-readout_shots = 10
-n_readout_repeats = 3
-
-# %%
-
-# -----------
-# Readout Error
-# -----------
-
-readout_mean_energies = []
-readout_std_energies = []
-readout_exact_energy_errors = []
-readout_noiseless_energy_errors = []
-
-for readout_prob in readout_error_list:
-    print("Investigating readout error for p =", readout_prob, ".....")
-    dev_readout = qml.device(
-        "default.mixed",
-        wires=n_orbitals,
-        shots=readout_shots,
-        readout_prob=readout_prob,
-    )
-
-    @qml.qnode(dev_readout)
-    def circuit_readout_noise(S, theta, ret_val="expval"):
-        ground_state()
-
-        for step in range(S):
-            for term in jw_U:
-                qml.exp(term, 1j * theta[step][0] / 2, num_steps=1)
-            for term in jw_h:
-                qml.exp(term, 1j * theta[step][1], num_steps=1)
-            for term in jw_v:
-                qml.exp(term, 1j * theta[step][2], num_steps=1)
-            for term in jw_U:
-                qml.exp(term, 1j * theta[step][0] / 2, num_steps=1)
-
-        if ret_val == "expval":
-            return qml.expval(full_Ham)
-        elif ret_val == "samples":
-            return qml.sample(wires=range(n_orbitals))
-
-    powell_options = {
-        "disp": True,
-        "maxiter": 2,
-        "maxfev": 2,
-        "xtol": 1e-1,
-        "ftol": 1e-1,
-    }
-
-    (
-        readout_best_energy,
-        readout_best_params,
-        readout_best_energy_arr,
-        readout_final_res,
-    ) = run_full_optimization(
-        circuit_readout_noise,
-        S_tot,
-        optim_pts=6,
-        init_sigma=0.1,
-        greedy_n_steps=1,
-        greedy_step_scale=0.1,
-        greedy_decay_start=80,
-        powell_options=powell_options,
-        max_alternate_rounds=1,
-        alternate_n_steps=1,
-        alternate_step_scale=0.001,
-        tol=1e-9,
-        acceptance_window=30,
-        acceptance_cutoff=15,
-        step_increase_factor=1.2,
-        step_decrease_factor=0.8,
-        verbose=True,
-    )
-
-    readout_best_params_reshaped = np.reshape(readout_best_params, (S_tot, 3))
-
-    sampled_energies = np.array(
-        [
-            circuit_readout_noise(S_tot, readout_best_params_reshaped)
-            for _ in range(n_readout_repeats)
-        ]
-    )
-
-    mean_energy = float(np.mean(sampled_energies))
-    std_energy = float(np.std(sampled_energies))
-
-    readout_mean_energies.append(mean_energy)
-    readout_std_energies.append(std_energy)
-    readout_exact_energy_errors.append(mean_energy - exact_energy)
-    readout_noiseless_energy_errors.append(mean_energy - noiseless_energy)
-
-
-print("\nReadout-noise summary")
-print("p | mean_energy | stddev_energy | error_to_exact | error_to_noiseless")
-for i, readout_prob in enumerate(readout_error_list):
-    print(
-        f"{readout_prob} | "
-        f"{readout_mean_energies[i]:.10f} | "
-        f"{readout_std_energies[i]:.10f} | "
-        f"{readout_exact_energy_errors[i]:.10f} | "
-        f"{readout_noiseless_energy_errors[i]:.10f}"
-    )
-
-# %%
-
-plt.figure()
-plt.errorbar(
-    readout_error_list,
-    readout_mean_energies,
-    yerr=readout_std_energies,
-    marker="o",
-    capsize=4,
-    label="Readout-noisy energy estimate",
-)
-plt.axhline(exact_energy, linestyle="--", color="green", label="Exact energy")
-plt.axhline(
-    noiseless_energy, linestyle=":", color="orange", label="Noiseless circuit energy"
-)
-plt.xlabel("Readout error probability")
-plt.ylabel("Estimated energy")
-plt.title("Readout-noise energy estimates")
-plt.legend()
-plt.show()
-
-
-plt.figure()
-plt.plot(
-    readout_error_list,
-    np.abs(readout_exact_energy_errors),
-    marker="o",
-    label="|E_readout - E_exact|",
-)
-plt.plot(
-    readout_error_list,
-    np.abs(readout_noiseless_energy_errors),
-    marker="s",
-    label="|E_readout - E_noiseless|",
-)
-plt.xlabel("Readout error probability")
-plt.ylabel("Absolute energy error")
-plt.title("Readout-noise energy error")
-plt.legend()
-plt.show()
-
-# %%
+# Example usage (commented out so importing this module does not build the big matrices):
+# qc = build_qiskit_equivalent_circuit(S_tot, np.reshape(best_params, (S_tot, 3)))
+# transpiled = transpile(qc, coupling_map=tuna9_coupling_map, basis_gates=tuna9_basis_gates,
+#                        optimization_level=routing_optimization_level,
+#                        initial_layout=routing_initial_layout, seed_transpiler=routing_seed)
+# print(transpiled)
+# ----------------------------------------------------------------------------
